@@ -30,7 +30,7 @@ class CounterfactualGenerator(object):
         return counterfactual_list
 
     
-    def generate_mulitple_counterfactuals_parallel(self, data, segment_size=1000,n_jobs=-1):
+    def generate_mulitple_counterfactuals_parallel(self, data, segment_size=10000000,n_jobs=-1):
         print("Getting into generate_mulitple_counterfactuals_parallel in CounterfactualGenerator.py")
         jobs = []
         self.pre_process()
@@ -67,9 +67,9 @@ class CounterfactualGenerator(object):
         obs = self.all_data[self.all_data["Loan ID"] == key]
         for col in self.all_data.columns:
             if col != "Loan Status":
-                results.loc[1, col] = obs[col].values[0]
-                results.loc[2, col] = counterfactual[col]
-        results  = results.T
+                results.loc[0, col] = obs[col].values[0]
+                results.loc[1, col] = counterfactual[col].values[0]
+        results = results.T
         results.columns = ["Original", "Counterfactual"]
         results["Difference"] = results["Counterfactual"] - results["Original"]
         results["% Difference"] = results["Difference"] / results["Original"] * 100 
