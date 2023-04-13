@@ -28,19 +28,12 @@ class FreezeKNNCF(CounterfactualGenerator):
         """
         weights = [] 
         self.data_class = self.all_data[self.model.predict(self.all_data.drop(self.config["target"], axis=1)) == self.target_class]
-        self.data_pca = self.data_class[self.config["features_to_change"]]
-        self.data_pca = self.normalizer.transform(self.data_pca) #normalize the data
-        self.data_pca = self.pca.transform(self.data_pca) #use pca to reduce the dimension of the data
-        self.data_pca = pd.DataFrame(data = self.data_pca, columns = self.features_pca) #convert the data to a dataframe
-        self.data_pca.reset_index(drop=True, inplace=True) #reset the index of the data
-        self.data_class.reset_index(drop=True, inplace=True) #reset the index of the data
-        self.data_pca = pd.concat([self.data_pca, self.data_class.drop(self.config["features_to_change"], axis=1)], axis=1) #concatenate the data with the original data
+        self.data_pca = self.convert_to_pca(self.data_class)
         for feature in self.data_pca.drop(self.config["target"], axis=1).columns: #for loop to generate the weights for the weighted minkowski distance
             if feature == "Loan ID" or feature == "Customer ID":
                 weights.append(0) 
             elif feature not in self.features_pca: #if the feature is not in features_to_change, give it a weight of 1 (we want to keep the value of these features the same)
                 weights.append(1)
-
             else:
                 weights.append(0) 
         w_minkowski = partial(minkowski, p=2, w=weights) #weighted minkowski distance. 
@@ -55,13 +48,9 @@ class FreezeKNNCF(CounterfactualGenerator):
         for indice in indices[0]: #for loop over the indices of the nearest neighbors
             count_index = self.data_class["Loan ID"].iloc[indice] 
             counterfactual = self.data_pca.iloc[indice][self.features_pca]
-            counterfactual_pred = self.pca.inverse_transform(counterfactual).reshape(1, -1) #inverse transform the counterfactual in order to get the original value of the counterfactual and check if the counterfactual is in the desired class
-            counterfactual_pred = pd.DataFrame(data = counterfactual_pred, columns = self.config["features_to_change"])
-            counterfactual_pred = self.normalizer.inverse_transform(counterfactual_pred) #inverse transform the counterfactual in order to get the original value of the counterfactual and check if the counterfactual is in the desired class
-            counterfactual_pred = pd.DataFrame(data = counterfactual_pred, columns = self.config["features_to_change"])
-            obs.reset_index(drop=True, inplace=True)
-            counterfactual_pred.reset_index(drop=True, inplace=True) 
-            counterfactual_pred = pd.concat([counterfactual_pred, obs.drop(self.features_pca, axis=1)], axis=1)
+            counterfactual = pd.DataFrame(counterfactual).T
+            counterfactual["Loan ID"] = count_index
+            counterfactual_pred = self.convert_to_original(counterfactual)
             #sort the columns to match the original data 
             counterfactual_pred = counterfactual_pred[self.all_data.drop(self.config["target"], axis=1).columns] #sort the columns to match the original data
             #check if the counterfactual is result with the desired class 
@@ -81,23 +70,13 @@ class FreezeKNNCF(CounterfactualGenerator):
 
         counterfactual_list = {}
         data_to_genrate = data_to_genrate[self.model.predict(data_to_genrate.drop(self.config["target"], axis=1)) != self.target_class]
-        data_to_genrate_norm = self.normalizer.transform(data_to_genrate[self.config["features_to_change"]])
-        data_to_genrate_norm = self.pca.transform(data_to_genrate_norm)
-        data_to_genrate_norm = pd.DataFrame(data = data_to_genrate_norm, columns = self.features_pca)
-        data_to_genrate_norm = data_to_genrate_norm.reset_index(drop=True)
-        data_to_genrate = data_to_genrate.reset_index(drop=True)
-        data_to_genrate = pd.concat([data_to_genrate_norm, data_to_genrate.drop(self.config["features_to_change"], axis=1)], axis=1)
+        data_to_genrate = self.convert_to_pca(data_to_genrate)
         for _, obs in data_to_genrate.iterrows():
             obs = obs.to_frame().T.drop(self.config["target"], axis=1)
             counterfactual = self.generate_single_counterfactual(obs) #generate a counterfactual for a single instance
             if counterfactual is not None: #if the counterfactual is not None, add the counterfactual to the counterfactual list and try to improve the counterfactual using binary search
-                new_obs = obs.copy() 
-                new_obs = self.pca.inverse_transform(new_obs[self.features_pca]).reshape(1, -1)
-                new_obs = pd.DataFrame(data = new_obs, columns = self.config["features_to_change"]) 
-                new_obs = self.normalizer.inverse_transform(new_obs)
-                new_obs = pd.DataFrame(data = new_obs, columns = self.config["features_to_change"])
-                new_obs = pd.concat([new_obs, obs.drop(self.features_pca, axis=1)], axis=1)
-                counterfactual = self.improve_with_binary_search_by_vectors(new_obs, counterfactual)
+                obs_original = self.convert_to_original(obs)
+                # counterfactual = self.improve_with_binary_search_by_vectors(obs_original, counterfactual)
                 counterfactual[self.config["features_to_change"]] = counterfactual[self.config["features_to_change"]].astype(int)
                 counterfactual_list[obs["Loan ID"].values[0]] = counterfactual
         return counterfactual_list
@@ -123,7 +102,7 @@ class FreezeKNNCF(CounterfactualGenerator):
         start_distance = 0
         end_distance = distance
 
-        while (end_distance-start_distance) > 0.0001: #while the distance between the start point and the end point is bigger than 0.0001, continue to improve the counterfactual
+        while (end_distance-start_distance).sum() > 0.0001: #while the distance between the start point and the end point is bigger than 0.0001, continue to improve the counterfactual
             mid_point = self.calculate_point(start_point,direction,(start_distance+end_distance)/2)
             mid_point = mid_point[self.all_data.drop(self.config["target"], axis=1).columns]
             mid_point[self.config["features_to_change"]] = mid_point[self.config["features_to_change"]].astype(int)
@@ -141,3 +120,24 @@ class FreezeKNNCF(CounterfactualGenerator):
         return pca.n_components_ 
         
         
+    def convert_to_pca(self, data):
+        original_data = data.copy()
+        data = self.normalizer.transform(data[self.config["features_to_change"]])
+        data = self.pca.transform(data)
+        data = pd.DataFrame(data = data, columns = self.features_pca)
+        data = data.reset_index(drop=True)
+        original_data = original_data.reset_index(drop=True)
+        data = pd.concat([data, original_data.drop(self.config["features_to_change"], axis=1)], axis=1).dropna()
+        return data 
+    
+    def convert_to_original(self, data):
+        original_data = self.all_data[self.all_data["Loan ID"] == data["Loan ID"].values[0]].copy()
+        data = self.pca.inverse_transform(data[self.features_pca]).reshape(1, -1)
+        data = pd.DataFrame(data = data, columns = self.config["features_to_change"]) 
+        data = self.normalizer.inverse_transform(data)
+        data = pd.DataFrame(data = data, columns = self.config["features_to_change"])
+        data = data.reset_index(drop=True)
+        original_data = original_data.reset_index(drop=True)
+        data = pd.concat([data, original_data.drop(self.config["features_to_change"], axis=1)], axis=1).dropna()
+        # print(data)
+        return data

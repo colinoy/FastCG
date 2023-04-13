@@ -230,18 +230,20 @@ class CounterfactualGenerator(object):
         
         """
         if self.config["target"] in obs.columns:
-            df2 = obs.drop(self.config["target"], axis=1).reset_index(drop=True)
+            df = obs.drop(self.config["target"], axis=1)
         else:
-            df2 = obs.copy().reset_index(drop=True)
+            df = obs.copy()
 
         # mock df with 3 columns 
-        df = counterfactoal.reset_index(drop=True)
+        df2 = counterfactoal.reset_index(drop=True)
         # display(obs)
         # display(counterfactoal)
         # diff df 
         df3 = df - df2
 
         # max of df and df2
+        display(df)
+        display(df2)
         df_max = df.where(df > df2, df2, axis=0)
 
         # min of df and df2
