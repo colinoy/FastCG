@@ -56,7 +56,8 @@ class ProbKnn(CounterfactualGenerator):
         """
         weights = [] 
         self.data_class = self.all_data[self.model.predict(self.all_data.drop(self.config["target"], axis=1)) == self.target_class]
-        self.data_with_weights = self.convert_to_pca(self.data_class) 
+        self.data_with_weights = self.convert_to_pca(self.data_class.copy())
+        self.data_with_weights = self.compute_weights_from_probabilites(self.data_with_weights.copy())
         for feature in self.data_with_weights.drop(self.config["target"], axis=1).columns: 
             if feature == "Loan ID" or feature == "Customer ID":
                 weights.append(0)  
@@ -65,7 +66,7 @@ class ProbKnn(CounterfactualGenerator):
             else:
                 weights.append(0.1)
         w_minkowski = partial(minkowski, p=2, w=weights)
-        self.nbrs = NearestNeighbors(n_neighbors=10, algorithm='ball_tree', metric=w_minkowski).fit(self.data_with_weights.drop(self.config["target"], axis=1))
+        self.nbrs = NearestNeighbors(n_neighbors=15, algorithm='ball_tree', metric=w_minkowski).fit(self.data_with_weights.drop(self.config["target"], axis=1))
 
 
     def compute_weights_from_probabilites(self, data):
@@ -84,12 +85,13 @@ class ProbKnn(CounterfactualGenerator):
         
 
         """
-        for feature in data.columns:
-            if feature == "Loan ID" or feature == "Customer ID" or feature == self.config["target"]:
+        scaler = StandardScaler()
+        for feature in data.drop(self.config["target"], axis=1).columns:
+            if feature == "Loan ID" or feature == "Customer ID":
                 continue
             if feature not in self.features_pca:
-                data[feature] = (data[feature] - data[feature].min()) / (data[feature].max() - data[feature].min())
-        return data.fillna(0)
+                data[feature] = scaler.fit_transform(data[feature].values.reshape(-1,1))
+        return data
 
     def distance(self, counterfactual, obs):
         """
@@ -131,6 +133,7 @@ class ProbKnn(CounterfactualGenerator):
 
         """
         obs = obs[self.data_with_weights.drop(self.config["target"], axis=1).columns]
+        obs_original = self.convert_to_original(obs)
         indices = self.nbrs.kneighbors(obs, return_distance=False) 
         cf = {}
         for indice in indices[0]: 
@@ -138,6 +141,9 @@ class ProbKnn(CounterfactualGenerator):
             for feature in self.features_pca: 
                 counterfactual[feature] = self.data_with_weights.iloc[indice][feature]
             counterfactual = self.convert_to_original(counterfactual)
+            for feature in self.config["increase_features"]:
+                if counterfactual[feature].values[0] < obs_original[feature].values[0]:
+                    counterfactual[feature] = obs_original[feature].values[0]*2
             if self.model.predict(counterfactual.drop(self.config["target"], axis=1)) == self.target_class:
                 distance = self.distance(counterfactual.copy(), obs.copy())
                 if distance not in cf:
@@ -187,7 +193,7 @@ class ProbKnn(CounterfactualGenerator):
             The number of PCA components that explain 80% of the variance.
 
         """
-        pca = PCA(n_components=0.95)
+        pca = PCA(n_components=0.7)
         pca.fit(self.normalizer.transform(self.all_data[self.config["features_to_change"]]))
         return pca.n_components_ 
         
@@ -285,7 +291,7 @@ class ProbKnn(CounterfactualGenerator):
         
         distance = self.calculate_distance(start_point,end_point) 
         direction = self.calculate_direction(start_point,end_point) 
-
+        
         start_distance = -distance
         end_distance = distance
 
