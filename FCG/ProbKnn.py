@@ -143,7 +143,7 @@ class ProbKnn(CounterfactualGenerator):
             counterfactual = self.convert_to_original(counterfactual)
             for feature in self.config["increase_features"]:
                 if counterfactual[feature].values[0] < obs_original[feature].values[0]:
-                    counterfactual[feature] = obs_original[feature].values[0]*2
+                    counterfactual[feature] = obs_original[feature].values[0]*3
             if self.model.predict(counterfactual.drop(self.config["target"], axis=1)) == self.target_class:
                 distance = self.distance(counterfactual.copy(), obs.copy())
                 if distance not in cf:

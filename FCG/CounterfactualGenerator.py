@@ -170,11 +170,10 @@ class CounterfactualGenerator(object):
             elif results["Difference"][row[0]] < 0:
                 print("Decrease ", row[0], " by ", row[1]["% Difference"], "%")
 
-        display(results)
-
         if show_plot:
             self.plot_the_counterfactoal(self.obs, self.counterfactual)
 
+        display(results)
         return self.obs, self.counterfactual
 
     def get_counterfactual(self, key, counterfactual_list):
@@ -236,6 +235,9 @@ class CounterfactualGenerator(object):
 
         # mock df with 3 columns 
         df = counterfactoal.reset_index(drop=True)
+        #turn the df to int values
+        df = df.astype(int)
+        df2 = df2.astype(int)
         # display(obs)
         # display(counterfactoal)
         # diff df 
