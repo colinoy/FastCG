@@ -8,7 +8,9 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 from sklearn.metrics.pairwise import euclidean_distances
-
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_classif
 
 class ProbKnn(CounterfactualGenerator):
     def __init__(self, all_data, model, config, target_class) -> None:
@@ -35,9 +37,10 @@ class ProbKnn(CounterfactualGenerator):
         """
         super().__init__(all_data, model, config, target_class)  
         self.nbrs = None
-        self.normalizer = StandardScaler().fit(self.all_data[self.config["features_to_change"]])    
+        self.features_to_use = self.find_feature_improtance_Anova(self.all_data)
+        self.normalizer = StandardScaler().fit(self.all_data[self.features_to_use])
         self.n_components = self.choose_pca_components()
-        self.pca = PCA(n_components=self.n_components).fit(self.normalizer.transform(self.all_data[self.config["features_to_change"]]))
+        self.pca = PCA(n_components=self.n_components).fit(self.normalizer.transform(self.all_data[self.features_to_use]))
         self.features_pca = ['principal component ' + str(i) for i in range(1, self.n_components+1)]
 
 
@@ -57,17 +60,42 @@ class ProbKnn(CounterfactualGenerator):
         weights = [] 
         self.data_class = self.all_data[self.model.predict(self.all_data.drop(self.config["target"], axis=1)) == self.target_class]
         self.data_with_weights = self.convert_to_pca(self.data_class.copy())
-        self.data_with_weights = self.compute_weights_from_probabilites(self.data_with_weights.copy())
-        for feature in self.data_with_weights.drop(self.config["target"], axis=1).columns: 
-            if feature == "Loan ID" or feature == "Customer ID":
-                weights.append(0)  
-            elif feature not in self.features_pca: 
-                weights.append(1)
-            else:
-                weights.append(0.1)
-        w_minkowski = partial(minkowski, p=2, w=weights)
-        self.nbrs = NearestNeighbors(n_neighbors=15, algorithm='ball_tree', metric=w_minkowski).fit(self.data_with_weights.drop(self.config["target"], axis=1))
+        # self.data_with_weights = self.compute_weights_from_probabilites(self.data_with_weights.copy())
+        self.data_centroid = self.find_centroid(self.data_with_weights.copy())
+        # for feature in self.data_centroid.columns: 
+        #     if feature == "Loan ID" or feature == "Customer ID":
+        #         weights.append(0)  
+        #     elif feature not in self.features_pca: 
+        #         weights.append(1)
+        #     else:
+        #         weights.append(0)
+        # w_minkowski = partial(minkowski, p=2, w=weights)
+        #find the nearest centroid to each observation in the dataset
+        self.nbrs = NearestNeighbors(n_neighbors=10, algorithm='ball_tree', metric='euclidean').fit(self.data_centroid[self.features_pca])
 
+
+    
+    def find_centroid(self, data):
+        """
+
+        Finds the centroid of a given dataset using Density-based clustering
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            The dataset for which we want to find the centroid.
+
+        Returns
+        -------
+        pd.DataFrame
+            The centroid of the given dataset.
+
+        """
+        kmean = KMeans(n_clusters=100, random_state=0).fit(data[self.features_pca])
+        return pd.DataFrame(kmean.cluster_centers_, columns=self.features_pca)
+
+
+        
 
     def compute_weights_from_probabilites(self, data):
         """
@@ -117,6 +145,10 @@ class ProbKnn(CounterfactualGenerator):
             obs = obs.drop(self.config["target"], axis=1)
         return euclidean_distances(counterfactual, obs)[0][0]
     
+
+
+        
+
     def generate_single_counterfactual(self, obs):
         """
         Generates a single counterfactual for a given observation.
@@ -132,25 +164,55 @@ class ProbKnn(CounterfactualGenerator):
             The counterfactual for the given observation.
 
         """
-        obs = obs[self.data_with_weights.drop(self.config["target"], axis=1).columns]
+        obs = obs[self.data_centroid.columns]
         obs_original = self.convert_to_original(obs)
         indices = self.nbrs.kneighbors(obs, return_distance=False) 
         cf = {}
-        for indice in indices[0]: 
+        for indice in indices[0]:
             counterfactual = obs.copy()
             for feature in self.features_pca: 
-                counterfactual[feature] = self.data_with_weights.iloc[indice][feature]
+                counterfactual[feature] = self.data_centroid.iloc[indice][feature]
             counterfactual = self.convert_to_original(counterfactual)
             for feature in self.config["increase_features"]:
                 if counterfactual[feature].values[0] < obs_original[feature].values[0]:
-                    counterfactual[feature] = obs_original[feature].values[0]*3
+                    counterfactual[feature] = obs_original[feature].values[0]*2
             if self.model.predict(counterfactual.drop(self.config["target"], axis=1)) == self.target_class:
-                distance = self.distance(counterfactual.copy(), obs.copy())
-                if distance not in cf:
-                    cf[distance] = counterfactual.copy()
-        if cf:
-            return cf[min(cf.keys())]
+                    return counterfactual
+        #             distance = self.distance(counterfactual.copy(), obs.copy())
+        #             if distance not in cf:
+        #                 cf[distance] = counterfactual.copy()
+        # if cf:
+        #     return cf[min(cf.keys())]
         return None 
+    
+
+    def find_feature_improtance_Anova(self, data, n_features=2):
+        """
+
+        Finds the feature importance using Anova.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            The dataset for which we want to find the feature importance.
+
+        Returns
+        -------
+        pd.DataFrame
+            The feature importance for each feature.
+        
+        """
+        X = data[self.config["features_to_change"]]
+        y = data[self.config["target"]]
+        anova = SelectKBest(score_func=f_classif, k=n_features)
+        fit = anova.fit(X, y)
+        dfscores = pd.DataFrame(fit.scores_)
+        dfcolumns = pd.DataFrame(X.columns)
+        featureScores = pd.concat([dfcolumns,dfscores],axis=1)
+        featureScores.columns = ['Features','Score']  #naming the dataframe columns
+        topn = featureScores.nlargest(n_features,'Score')
+        return topn["Features"].values.tolist()
+        
 
 
     def generate_mulitple_counterfactuals(self, data_to_genrate):
@@ -170,16 +232,16 @@ class ProbKnn(CounterfactualGenerator):
         
         """
         counterfactual_list = {}
-        data_to_genrate = data_to_genrate[self.model.predict(data_to_genrate.drop(self.config["target"], axis=1)) != self.target_class]
+        data_to_genrate = data_to_genrate[self.model.predict(data_to_genrate) != self.target_class]
         data_to_genrate = self.convert_to_pca(data_to_genrate)
         data_to_genrate = data_to_genrate.fillna(0)
         for _, obs in data_to_genrate.iterrows():
-            obs = obs.to_frame().T.drop(self.config["target"], axis=1)
+            obs = obs.to_frame().T
             counterfactual = self.generate_single_counterfactual(obs) 
             if counterfactual is not None:
                 obs = self.convert_to_original(obs)
                 counterfactual_using_binary_search = self.improve_with_binary_search_by_vectors(obs, counterfactual)
-                counterfactual_using_binary_search[self.config["features_to_change"]] = counterfactual_using_binary_search[self.config["features_to_change"]].astype(int)
+                counterfactual_using_binary_search[self.features_to_use] = counterfactual_using_binary_search[self.features_to_use].astype(int)
                 counterfactual_list[obs["Loan ID"].values[0]] = counterfactual_using_binary_search
         return counterfactual_list
     
@@ -193,7 +255,7 @@ class ProbKnn(CounterfactualGenerator):
             The number of PCA components that explain 80% of the variance.
 
         """
-        pca = PCA(n_components=0.7)
+        pca = PCA(n_components=0.95)
         pca.fit(self.normalizer.transform(self.all_data[self.config["features_to_change"]]))
         return pca.n_components_ 
         
@@ -213,12 +275,12 @@ class ProbKnn(CounterfactualGenerator):
             The data in the PCA space.
         """
         original_data = data.copy()
-        data = self.normalizer.transform(data[self.config["features_to_change"]])
+        data = self.normalizer.transform(data[self.features_to_use])
         data = self.pca.transform(data)
         data = pd.DataFrame(data = data, columns = self.features_pca)
         data = data.reset_index(drop=True)
         original_data = original_data.reset_index(drop=True)
-        data = pd.concat([data, original_data.drop(self.config["features_to_change"], axis=1)], axis=1).dropna()
+        data = pd.concat([data, original_data.drop(self.features_to_use, axis=1)], axis=1).dropna()
         return data 
     
     def convert_to_original(self, data):
@@ -237,12 +299,12 @@ class ProbKnn(CounterfactualGenerator):
         """
         original_data = self.all_data[self.all_data["Loan ID"] == data["Loan ID"].values[0]].copy()
         data = self.pca.inverse_transform(data[self.features_pca]).reshape(1, -1)
-        data = pd.DataFrame(data = data, columns = self.config["features_to_change"]) 
+        data = pd.DataFrame(data = data, columns = self.features_to_use) 
         data = self.normalizer.inverse_transform(data)
-        data = pd.DataFrame(data = data, columns = self.config["features_to_change"])
+        data = pd.DataFrame(data = data, columns = self.features_to_use)
         data = data.reset_index(drop=True)
         original_data = original_data.reset_index(drop=True)
-        data = pd.concat([data, original_data.drop(self.config["features_to_change"], axis=1)], axis=1).dropna()
+        data = pd.concat([data, original_data.drop(self.features_to_use, axis=1)], axis=1).dropna()
         data = data[self.all_data.columns]
         return data
     
@@ -298,7 +360,7 @@ class ProbKnn(CounterfactualGenerator):
         while (end_distance-start_distance).sum() > distance*0.001: 
             mid_point = self.calculate_point(start_point,direction,(start_distance+end_distance)/2)
             mid_point = mid_point[self.all_data.drop(self.config["target"], axis=1).columns]
-            mid_point[self.config["features_to_change"]] = mid_point[self.config["features_to_change"]].astype(int)
+            mid_point[self.features_to_use] = mid_point[self.features_to_use].astype(int)
             if self.model.predict(mid_point) == self.target_class:
                 end_distance = (start_distance+end_distance)/2
             else:
