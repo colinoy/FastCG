@@ -146,9 +146,9 @@ class CounterfactualGenerator(object):
         """
         results = pd.DataFrame()
         counterfactual = counterfactual_list.get(key)
-        self.obs = self.all_data[self.all_data["Loan ID"] == key].copy().drop("Loan Status", axis=1)
+        self.obs = self.all_data[self.all_data[self.config["ID"]] == key].copy().drop(self.config["target"], axis=1)
         for col in self.all_data.columns:
-            if col != "Loan Status":
+            if col != self.config["target"]:
                 results.loc[0, col] = self.obs[col].values[0].astype(int)
                 results.loc[1, col] = counterfactual[col].values[0].astype(int)
         results = results.T
@@ -163,12 +163,14 @@ class CounterfactualGenerator(object):
         print("Loan ID: ", key)
         print("-------------------------------------------------------------------")
         for row in results.iterrows():
-            if row[0] == "Loan ID":
+            if row[0] == self.config["ID"]:
                     continue
             if results["Difference"][row[0]] > 0:
                 print("Increase ", row[0], " by ", row[1]["% Difference"], "%") 
+                print("Increase ", row[0], " by ", row[1]["Difference"], " units")
             elif results["Difference"][row[0]] < 0:
                 print("Decrease ", row[0], " by ", row[1]["% Difference"], "%")
+                print("Decrease ", row[0], " by ", row[1]["Difference"], " units")
 
         if show_plot:
             self.plot_the_counterfactoal(self.obs, self.counterfactual)
@@ -200,9 +202,9 @@ class CounterfactualGenerator(object):
 
         results = pd.DataFrame()
         counterfactual = counterfactual_list.get(key)
-        obs = self.all_data[self.all_data["Loan ID"] == key].copy().drop("Loan Status", axis=1)
+        obs = self.all_data[self.all_data[self.config["ID"]] == key].copy().drop("Loan Status", axis=1)
         for col in self.all_data.columns:
-            if col != "Loan Status":
+            if col != self.config["target"]:
                 results.loc[0, col] = self.obs[col].values[0]
                 results.loc[1, col] = counterfactual[col].values[0]
         results = results.T
