@@ -2,6 +2,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neighbors import NearestNeighbors
 import numpy as np
 import pandas as pd
+import scipy as sp
 from joblib import Parallel, delayed
 from functools import partial
 
@@ -63,9 +64,9 @@ class CFKnn(CounterfactualGenerator):
             if self.model.predict(obs.to_frame().T)[0] == self.target_class:
                 continue
             else:
-                counterfactual = self._generate_single_counterfactual(obs, self.nbrs)
+                counterfactual, distance = self._generate_single_counterfactual(obs, self.nbrs)
                 if counterfactual is not None:
-                    counterfactual_list.append(counterfactual)
+                    counterfactual_list.append((counterfactual, distance))
         return counterfactual_list
     
     def _generate_single_counterfactual(self, obs, nbrs):
@@ -75,7 +76,8 @@ class CFKnn(CounterfactualGenerator):
             for feature in self.config["features_to_change"]:
                 counterfactual[feature] = self.all_data.iloc[i][feature]
                 if self.model.predict(counterfactual.to_frame().T)[0] == self.target_class: 
-                    return counterfactual
+                    distance = sp.spatial.distance.minkowski(counterfactual, obs, p=2, w=None)
+                    return counterfactual, distance
         return None
             
 
