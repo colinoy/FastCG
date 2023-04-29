@@ -68,7 +68,7 @@ def l2_distance(delta: np.ndarray) -> List[float]:
     List[float]
     """
     squared_difference = np.square(np.abs(delta))
-    distance = np.sum(squared_difference, axis=1, dtype=np.float).tolist()
+    distance = np.power(np.sum(squared_difference, axis=1, dtype=np.float),0.5).tolist()
     return distance 
 
 def linf_distance(delta: np.ndarray) -> List[float]:
