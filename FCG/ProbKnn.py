@@ -1,4 +1,5 @@
-from FCG.CounterfactualGenerator import CounterfactualGenerator
+#from FCG.CounterfactualGenerator import CounterfactualGenerator
+from CounterfactualGenerator import CounterfactualGenerator
 from sklearn.neighbors import KNeighborsClassifier, NearestNeighbors
 from functools import partial
 from scipy.spatial.distance import minkowski
@@ -37,6 +38,7 @@ class ProbKnn(CounterfactualGenerator):
         """
         super().__init__(all_data, model, config, target_class)  
         self.nbrs = None
+        self.max_features_to_change = self.config['max_features_to_change']
         self.features_to_use = self.find_feature_improtance_Anova(self.all_data)
         self.normalizer = StandardScaler().fit(self.all_data[self.features_to_use])
         self.n_components = self.choose_pca_components()
@@ -199,7 +201,7 @@ class ProbKnn(CounterfactualGenerator):
         return None 
     
 
-    def find_feature_improtance_Anova(self, data, n_features=2):
+    def find_feature_improtance_Anova(self, data, n_features):
         """
 
         Finds the feature importance using Anova.
@@ -217,6 +219,7 @@ class ProbKnn(CounterfactualGenerator):
         """
         X = data[self.config["features_to_change"]]
         y = data[self.config["target"]]
+        n_features = self.max_features_to_change
         anova = SelectKBest(score_func=f_classif, k=n_features)
         fit = anova.fit(X, y)
         dfscores = pd.DataFrame(fit.scores_)
@@ -380,3 +383,4 @@ class ProbKnn(CounterfactualGenerator):
                 start_distance = (start_distance+end_distance)/2
 
         return self.calculate_point(start_point,direction,(start_distance+end_distance)/2)
+    
