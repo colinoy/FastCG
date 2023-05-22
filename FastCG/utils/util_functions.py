@@ -144,13 +144,14 @@ def improve_with_binary_search_by_vectors(original_obs, genrated_cf, model, feat
             mid_point = calculate_point(original_obs,direction,(start_distance+end_distance)/2)
             mid_point = mid_point[cols]
             mid_point[features_to_use] = mid_point[features_to_use].astype(int)
-            if smart_condition.check(model.predict(mid_point)[0]): # TODO: Check why predict gave back an array instead of int / float
+            if smart_condition.check(model.predict(mid_point.drop("ID", axis=1))[0]):
                 end_distance = (start_distance+end_distance)/2
             else:
                 start_distance = (start_distance+end_distance)/2
     except Exception as e:
-        Logger.info("Error in binary search: {}".format(e))
-        Logger.info(mid_point)
+        Logger.exception("Error in binary search: {}".format(e))
+        Logger.exception(mid_point)
         return None
     end_distance += distance*0.01
-    return calculate_point(original_obs,direction,(start_distance+end_distance)/2)
+    final_point = calculate_point(original_obs,direction,end_distance)
+    return pd.DataFrame(final_point, columns=cols)

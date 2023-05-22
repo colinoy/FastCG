@@ -16,9 +16,10 @@ class GeneratorBase():
 
     configuration_schema = {'features_to_change': {'type': list, 'schema': {'type': str}, 'required': True, 'minlength': 1},
                             'increase_only': {'type': list, 'schema': {'type': str}, 'required': False},
+                            'decrease_only': {'type': list, 'schema': {'type': str}, 'required': False},
                             'max_features_to_change' : {'type': int, 'required': True, 'min': 1, 'default': 2},
                             'target': {'type': str, 'required': True},
-                            'ID': {'type': str, 'required': True}}
+                            'ID': {'type': str, 'required': False}}
     
     def __init__(self, all_data, model, config, target, condition, verbose=0):
         """
@@ -35,7 +36,7 @@ class GeneratorBase():
         verbose : int
             Verbosity level, 0 means only show warning, 1 means show info, 2 means show debug
         """
-        self.all_data = all_data
+        self.all_data = all_data.copy()
         if not self._is_valid_config(config):
             raise ValueError("Invalid config")
         self.config = config
@@ -169,10 +170,9 @@ class GeneratorBase():
         chunk : list
             List of data that contains counterfactual targets
             """
-        id = self.config['ID']
         data_to_generate = []
         for index, obs in chunk.iterrows():
-            pred_result = self.model.predict(obs.to_frame().T)
+            pred_result = self.model.predict(obs.to_frame().T.drop(self.id, axis=1))
             if not self.smart_condition(pred_result):
                 preprocessed_obs = self._preprocess_counterfactual_targets(obs)
                 data_to_generate.append((obs,preprocessed_obs))
@@ -259,9 +259,9 @@ class GeneratorBase():
         for obs in tqdm(generated_data, desc="Sanity check on generated data"):
             #if obs is df 
             if isinstance(obs, pd.DataFrame):
-                res = self.model.predict(obs)
+                res = self.model.predict(obs.drop(self.id, axis=1))
             else:
-                obs = obs.to_frame().T
+                obs = obs.to_frame().T.drop(self.id, axis=1)
                 res = self.model.predict(obs)
             if not self.smart_condition.check(res):
                 invalid_data.append(obs)
@@ -288,7 +288,7 @@ class GeneratorBase():
         else:
             valid_data = []
             for chunk in tqdm(chunks, desc="Postprocessing valid data in sequencial"):
-                valid_data += self._postprocess_valid_data(chunk)
+                valid_data.append(self._postprocess_valid_data(chunk))
             valid_data = {k: v for d in valid_data for k, v in d.items()}
 
         # valid_data = self._postprocess_valid_data(valid_data)
@@ -376,7 +376,7 @@ class GeneratorBase():
         Logger.debug(
             f"Generating data for each chunk, total chunks: {len(chunks)}")
         generated_data = Parallel(n_jobs=n_jobs, require='sharedmem')(
-            delayed(self._generate_chunk)(chunk) for chunk in tqdm(chunks, desc="Generating Counterfactuals in chunks in parallel"))
+            delayed(self._generate_chunk)(chunk) for chunk in tqdm(chunks, desc="Generating Counterfactual in chunks in parallel"))
 
         if not generated_data:
             Logger.critical("No data generated")
@@ -386,8 +386,6 @@ class GeneratorBase():
         if isinstance(generated_data[0], list):
             generated_data = [
                 item for sublist in generated_data for item in sublist]
-
-        # TODO: Check with linoy what to do here
 
         return generated_data
 
@@ -405,12 +403,12 @@ class GeneratorBase():
     
     def show_counterfactual(self, key, counterfactual_list, show_plot=False):
         """
-        Show the counterfactual for a given loan ID.
+        Show the counterfactual for a given ID.
 
         Parameters
         ----------
         key : int
-            The loan ID.
+            The ID.
         
         counterfactual_list : list
             A list of counterfactuals.
@@ -425,7 +423,7 @@ class GeneratorBase():
         """
         results = pd.DataFrame()
         counterfactual = counterfactual_list.get(key)
-        self.obs = self.all_data[self.all_data[self.config["ID"]] == key].copy().drop(self.config["target"], axis=1)
+        self.obs = self.all_data[self.all_data[self.id] == key].copy().drop(self.config["target"], axis=1)
         for col in self.all_data.columns:
             if col != self.config["target"]:
                 results.loc[0, col] = self.obs[col].values[0].astype(int)
@@ -437,12 +435,12 @@ class GeneratorBase():
         results["% Difference"] = results["Difference"] / results["Original"] * 100 
         results["% Difference"] = results["% Difference"].fillna(0)
         results["% Difference"] = results["% Difference"].replace([np.inf, -np.inf], 0)
-        print("In order for the loan to be approved, the following changes need to be made:")
+        # print("In order to change the prediction from ", self.obs[self.config["target"]].values[0], " to ", counterfactual[self.config["target"]].values[0], " do the following:")
         print("-------------------------------------------------------------------")
         print("ID: ", key)
         print("-------------------------------------------------------------------")
         for row in results.iterrows():
-            if row[0] == self.config["ID"]:
+            if row[0] == self.id:
                     continue
             if results["Difference"][row[0]] > 0:
                 print("Increase ", row[0], " by ", row[1]["% Difference"], "%") 
@@ -459,12 +457,12 @@ class GeneratorBase():
 
     def get_counterfactual(self, key, counterfactual_list):
         """
-        Get the counterfactual for a given loan ID. 
+        Get the counterfactual for a given ID. 
 
         Parameters
         ----------
         key : int
-            The loan ID.
+            The ID.
         
         counterfactual_list : list
             A list of counterfactuals.
@@ -481,7 +479,7 @@ class GeneratorBase():
 
         results = pd.DataFrame()
         counterfactual = counterfactual_list.get(key)
-        obs = self.all_data[self.all_data[self.config["ID"]] == key].copy().drop(self.config['target'], axis=1)
+        obs = self.all_data[self.all_data[self.id] == key].copy().drop(self.config['target'], axis=1)
         for col in self.all_data.columns:
             if col != self.config["target"]:
                 results.loc[0, col] = self.obs[col].values[0]
@@ -494,7 +492,7 @@ class GeneratorBase():
 
     def plot_the_counterfactual(self, obs, counterfactual):
         """
-        Plot the counterfactual for a given loan ID.
+        Plot the counterfactual for a given ID.
 
         Parameters
         ----------

@@ -21,8 +21,7 @@ class ProbKnnGenerator(GeneratorBase):
     def _preprocess_all_data(self):
         self.data_matching_condition = \
                 self.all_data[
-                    self.smart_condition.check(
-                        self.model.predict(self.all_data.drop(self.config["target"], axis=1)))
+                    self.smart_condition.check(self.model.predict(self.all_data.drop([self.config["target"]], axis=1)))
                     ]
         self.features_to_use = \
             find_feature_improtance_Anova(
@@ -31,26 +30,21 @@ class ProbKnnGenerator(GeneratorBase):
                 self.config["features_to_change"], 
                 self.config["target"]
                 )
-        
-        if "increase_only" in self.config and "decrease_only" in self.config:
+        if "increase_only" in self.config and self.config["increase_only"] is not None:
             self.features_increase_only = self.config["increase_only"]
+        else: 
+            self.features_increase_only = []
+        if "decrease_only" in self.config and self.config["decrease_only"] is not None:
             self.features_decrease_only = self.config["decrease_only"]
-        elif "increase_only" in self.config and "decrease_only" not in self.config:
-            self.features_increase_only = self.config["increase_only"]
-            _, self.features_decrease_only = find_feature_direction(self.data_matching_condition, self.features_to_use, self.config["target"])
-        elif "increase_only" not in self.config and "decrease_only" in self.config:
-            _, self.features_increase_only = find_feature_direction(self.data_matching_condition, self.features_to_use, self.config["target"])
-            self.features_decrease_only = self.config["decrease_only"]
-        else:
-            Logger.debug("Finding features to increase and decrease by using feature direction")
-            self.features_increase_only, self.features_decrease_only = find_feature_direction(self.data_matching_condition, self.features_to_use, self.config["target"])
-
+        else: 
+            self.features_decrease_only = []
         Logger.info("Features to use: " + str(self.features_to_use))
         Logger.info("Features to increase: " + str(self.features_increase_only))
         Logger.info("Features to decrease: " + str(self.features_decrease_only))
 
         self.all_data_features_to_use = self.all_data[self.features_to_use]
-        
+        self.all_data["ID"] = self.all_data.index
+        self.id = "ID"
         self.normalizer = StandardScaler().fit(self.all_data_features_to_use)
         self.data_normalized_features_to_use = self.normalizer.transform(self.all_data_features_to_use)
         
@@ -65,6 +59,7 @@ class ProbKnnGenerator(GeneratorBase):
 
     def _preprocess_generate(self, data) -> None:
         self.current_data = data
+        self.current_data["ID"] = self.current_data.index
     
     def _preprocess_counterfactual_targets(self, obs) -> pd.DataFrame:
         data_to_genrate = convert_to_pca(obs.to_frame().T, self.pca, self.normalizer, self.features_to_use, self.features_pca)
@@ -77,7 +72,7 @@ class ProbKnnGenerator(GeneratorBase):
     def _generate_single(self, original_obs, processed_obs):
         # Logger.info("Generating counterfactual for observation: " + str(processed_obs))
         indices = self.knn_on_cluster(processed_obs)
-        base_obs = self.current_data[self.current_data[self.config["ID"]] == processed_obs[self.config["ID"]].values[0]].copy()
+        base_obs = self.current_data[self.current_data[self.id] == processed_obs[self.id].values[0]]
         cf = {}
         for idx in indices:
             counterfactual = processed_obs.copy()
@@ -96,9 +91,9 @@ class ProbKnnGenerator(GeneratorBase):
             if self.config["target"] in tmp_counterfactual:
                     tmp_counterfactual = counterfactual.drop(self.config["target"], axis=1)
 
-            if self.smart_condition.check(self.model.predict(tmp_counterfactual)[0]):
+            if self.smart_condition.check(self.model.predict(tmp_counterfactual.drop(self.id, axis=1)))[0]:
                 # return counterfactual
-                distance = obs_distance(counterfactual.copy(), processed_obs.copy(), self.config["target"])
+                distance = obs_distance(counterfactual.copy(), base_obs.copy(), self.config["target"])
                 if distance not in cf:
                     cf[distance] = counterfactual.copy()
         if cf:
@@ -143,7 +138,7 @@ class ProbKnnGenerator(GeneratorBase):
         weights = []
         data_cluster = self.data_pca.loc[index] 
         for feature in data_cluster.drop(self.config["target"], axis=1).columns: 
-            if feature == self.config["ID"]:
+            if feature == self.id:
                 weights.append(0)  
             elif feature not in self.features_pca: 
                 weights.append(1)
@@ -157,9 +152,9 @@ class ProbKnnGenerator(GeneratorBase):
     
     def _postprocess_valid_data(self, data) -> list:        
         improve_cf = {}
-        for couterfactual in tqdm(data, desc="Improving counterfactualswith binary search"):
-            id_key = couterfactual[self.config["ID"]].values[0]
-            original_obs = self.all_data[self.all_data[self.config["ID"]] == couterfactual[self.config["ID"]].values[0]].drop(self.config["target"], axis=1).copy()
+        for couterfactual in tqdm(data, desc="Improving counterfactuals with binary search"):
+            id_key = couterfactual[self.id].values[0]
+            original_obs = self.all_data[self.all_data[self.id] == couterfactual[self.id].values[0]].drop(self.config["target"], axis=1).copy()
             cf = couterfactual.copy()
             imrpoved = improve_with_binary_search_by_vectors(original_obs, cf, self.model, self.features_to_use, self.smart_condition)
             improve_cf[id_key] = imrpoved
