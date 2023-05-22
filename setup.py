@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-VERSION = '0.0.2'
+VERSION = '0.0.3'
 DESCRIPTION = 'Counterfactual Generation Package'
 LONG_DESCRIPTION = 'A package that makes it easy generate counterfactuals in a fast manner'
 
