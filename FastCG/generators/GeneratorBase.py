@@ -9,7 +9,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from IPython.display import display
-
+import json
+from sklearn.preprocessing import LabelEncoder
 
 
 class GeneratorBase():
@@ -18,10 +19,14 @@ class GeneratorBase():
                             'increase_only': {'type': list, 'schema': {'type': str}, 'required': False},
                             'decrease_only': {'type': list, 'schema': {'type': str}, 'required': False},
                             'max_features_to_change' : {'type': int, 'required': True, 'min': 1, 'default': 2},
+                            'Categorical_features' : {'type': list, 'schema': {'type': str}, 'required': False}, 
                             'target': {'type': str, 'required': True},
-                            'ID': {'type': str, 'required': False}}
+                            'ID': {'type': str, 'required': False}, 
+                            "feature_range": {'type': dict, 'required': False, 'schema': {'type': dict, 'schema': {'type': list, 'schema': {'type': float}}}},
+
+    }
     
-    def __init__(self, all_data, model, config, target, condition, verbose=0):
+    def __init__(self, all_data, model, config, target, condition, verbose=1):
         """
         Base class for all generators
 
@@ -31,14 +36,22 @@ class GeneratorBase():
             List of all data
         model : ModelBase
             Model to be used to generate data
-        config : dict
+        config : dict or str (json)
             Configuration for the generator
         verbose : int
             Verbosity level, 0 means only show warning, 1 means show info, 2 means show debug
         """
         self.all_data = all_data.copy()
+
+        # check if config is json
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except:
+                raise ValueError("Invalid JSON format for config")
+        
         if not self._is_valid_config(config):
-            raise ValueError("Invalid config")
+            raise ValueError("Invalid config format (not the same as schema)")
         self.config = config
         self.verbose = verbose
         self.model = model
@@ -172,7 +185,15 @@ class GeneratorBase():
             """
         data_to_generate = []
         for index, obs in chunk.iterrows():
-            pred_result = self.model.predict(obs.to_frame().T.drop(self.id, axis=1))
+            #turn obs features to categorical if needed 
+            obs = obs.to_frame().T
+            #convert the numerical features to int if needed 
+            for col in obs.columns:
+                if col not in self.config['categorical_features']:
+                    obs[col] = obs[col].astype(int)
+                if col in self.config["categorical_features"]:
+                    obs[col] = obs[col].astype("category")     
+            pred_result = self.model.predict(obs.drop(self.id, axis=1))
             if not self.smart_condition(pred_result):
                 preprocessed_obs = self._preprocess_counterfactual_targets(obs)
                 data_to_generate.append((obs,preprocessed_obs))
@@ -424,28 +445,46 @@ class GeneratorBase():
         results = pd.DataFrame()
         counterfactual = counterfactual_list.get(key)
         self.obs = self.all_data[self.all_data[self.id] == key].copy().drop(self.config["target"], axis=1)
-        for col in self.all_data.columns:
-            if col != self.config["target"]:
+        category_cols = self.obs.select_dtypes(include=["object", "category"]).columns
+        for col in self.all_data.drop(self.config["target"], axis=1).columns:
+            if col not in category_cols:
                 results.loc[0, col] = self.obs[col].values[0].astype(int)
                 results.loc[1, col] = counterfactual[col].values[0].astype(int)
+            else:
+                results.loc[0, col] = self.obs[col].values[0]
+                results.loc[1, col] = counterfactual[col].values[0]
+        categorical_cols = results[results.select_dtypes(include=["object", "category"]).columns]
+        results = results[results.select_dtypes(exclude=["object", "category"]).columns].astype(str)
         results = results.T
         results.columns = ["Original", "Counterfactual"]
-        self.counterfactual = results["Counterfactual"].to_frame().T
-        results["Difference"] = results["Counterfactual"] - results["Original"]
-        results["% Difference"] = results["Difference"] / results["Original"] * 100 
-        results["% Difference"] = results["% Difference"].fillna(0)
-        results["% Difference"] = results["% Difference"].replace([np.inf, -np.inf], 0)
-        # print("In order to change the prediction from ", self.obs[self.config["target"]].values[0], " to ", counterfactual[self.config["target"]].values[0], " do the following:")
+        self.counterfactual = results["Counterfactual"].to_frame()
+        results["Difference"] = results["Counterfactual"].astype(float) - results["Original"].astype(float)
+        results["% Difference"] = (results["Difference"] / results["Original"].astype(float)) * 100
+        results = results.round(2)
+        #remmove null values and inf values
+        results = results.replace([np.inf, -np.inf, np.nan], 0)
+        #combine with the categorical columns 
+        for col in category_cols:
+            results.loc[col, "Original"] = categorical_cols[col].values[0]
+            results.loc[col, "Counterfactual"] = categorical_cols[col].values[1]
+            if results["Original"][col] == results["Counterfactual"][col]:
+                results.loc[col, "Difference"] = "Same category"
+                results.loc[col, "% Difference"] = "Same category"
+            else:
+                results.loc[col, "Difference"] = "Changed category"
+                results.loc[col, "% Difference"] = "Changed category"
         print("-------------------------------------------------------------------")
         print("ID: ", key)
         print("-------------------------------------------------------------------")
         for row in results.iterrows():
-            if row[0] == self.id:
-                    continue
-            if results["Difference"][row[0]] > 0:
+            if results["Difference"][row[0]] == "Same category":
+                print(row[0], " is the same")
+            elif results["Difference"][row[0]] != "Same category":
+                print(row[0], " changed from ", row[1]["Original"], " to ", row[1]["Counterfactual"])
+            if  isinstance(results["Difference"][row[0]], float) and results["Difference"][row[0]] > 0:
                 print("Increase ", row[0], " by ", row[1]["% Difference"], "%") 
                 print("Increase ", row[0], " by ", row[1]["Difference"], " units")
-            elif results["Difference"][row[0]] < 0:
+            elif isinstance(results["Difference"][row[0]], float) and results["Difference"][row[0]] < 0:
                 print("Decrease ", row[0], " by ", row[1]["% Difference"], "%")
                 print("Decrease ", row[0], " by ", row[1]["Difference"], " units")
 
@@ -518,9 +557,6 @@ class GeneratorBase():
         #turn the df to int values
         df = df.astype(int)
         df2 = df2.astype(int)
-
-        print(df2.shape)
-        print(counterfactual.shape)
         # display(obs)
         # display(counterfactual)
         # diff df 
@@ -544,6 +580,9 @@ class GeneratorBase():
         # plot the data, overlay the plots in the following order green,red and then gray
         fig, ax = plt.subplots(figsize=(10, 5))
         plt.xticks(rotation=90)
+        plt.ylabel("Value")
+        plt.xlabel("Feature")
+        plt.ylim(0, 1.1 * df.values.max())
         # green bar is only outline of the bar
 
         width = 0.5
@@ -563,7 +602,6 @@ class GeneratorBase():
 
         for index,col_x in enumerate(patches):
 
-
             label_data = df3.iloc[0, index].round(2)
             if label_data > 0:
                 label = u'$\u25B2$' + f'{label_data}'
@@ -581,3 +619,7 @@ class GeneratorBase():
                         ha='center', va='center', 
                         fontsize=11, color='green' if label_data > 0 else 'red', 
                         xytext=(0, 8), textcoords='offset points')
+            
+        # add the legend
+        ax.legend(['Increase', 'Decrease', 'No Change'], loc='upper left', bbox_to_anchor=(1, 1))
+        plt.show()

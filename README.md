@@ -61,11 +61,11 @@ from FastCG.generators import ProbKnnGenerator
 # step three - create a config for the generator
 
 config = {"features_to_change": ['Current Loan Amount', 'Term', 'Credit Score', 'Annual Income', 'Monthly Debt'],
-              "increase_only": ['Credit Score', 'Annual Income'],
-              "decrease_only": ['Monthly Debt'],
+              "increase_only": ['Credit Score', 'Annual Income'], # optional
+              "decrease_only": ['Monthly Debt'], # optional
               "max_features_to_change": 2,
-              "ID": 'Loan ID',
-              "target": 'Loan Status'
+              "ID": 'Loan ID', # optional
+              "target": 'Loan Status' 
               }
 
 # step four - create a generator

@@ -30,23 +30,51 @@ class ProbKnnGenerator(GeneratorBase):
                 self.config["features_to_change"], 
                 self.config["target"]
                 )
+
+        self.features_to_use = self.config["features_to_change"]
         if "increase_only" in self.config and self.config["increase_only"] is not None:
             self.features_increase_only = self.config["increase_only"]
         else: 
             self.features_increase_only = []
+            
         if "decrease_only" in self.config and self.config["decrease_only"] is not None:
             self.features_decrease_only = self.config["decrease_only"]
         else: 
             self.features_decrease_only = []
+
         Logger.info("Features to use: " + str(self.features_to_use))
         Logger.info("Features to increase: " + str(self.features_increase_only))
         Logger.info("Features to decrease: " + str(self.features_decrease_only))
 
+        # Find all categorical features based on the dataset types
+        # this is regardless of the config as we need to know the categorical features to properly handle the distance calculation
+        self.categorical_features = self.data_matching_condition[self.features_to_use].select_dtypes(include=['object', 'category']).columns
+        if "categorical_features" in self.config and self.config["categorical_features"] is not None:
+            # Add the categorical features from the config to the list of categorical features found in the dataset
+            self.categorical_features = self.categorical_features.union(self.config["categorical_features"])
+            Logger.info("You have provided the following categorical features: " + str(self.config["categorical_features"]))
+        elif len(self.categorical_features) > 0:
+            Logger.info("We have found " + str(len(self.categorical_features)) + " categorical features: " + str(self.categorical_features))
+
+        if "feature_range" in self.config and self.config["feature_range"] is not None:
+            self.feature_range = self.config["feature_range"]
+        else:
+            self.feature_range = (self.data_matching_condition[self.features_to_use].min(), self.data_matching_condition[self.features_to_use].max())
+            Logger.info("Feature range: " + str(self.feature_range))
+
+        self.all_data = self.all_data.copy()
         self.all_data_features_to_use = self.all_data[self.features_to_use]
         self.all_data["ID"] = self.all_data.index
         self.id = "ID"
-        self.normalizer = StandardScaler().fit(self.all_data_features_to_use)
-        self.data_normalized_features_to_use = self.normalizer.transform(self.all_data_features_to_use)
+        #check if we have categorical features 
+        categorical_features_in_features_to_change = self.all_data_features_to_use.select_dtypes(include=['object', 'category']).columns
+        if len(categorical_features_in_features_to_change) > 0:
+            features_to_normalize = self.all_data_features_to_use.drop(categorical_features_in_features_to_change, axis=1)
+            self.normalizer = StandardScaler().fit(features_to_normalize)
+            self.data_normalized_features_to_use = self.normalizer.transform(features_to_normalize)
+        else:
+            self.normalizer = StandardScaler().fit(self.all_data_features_to_use)
+            self.data_normalized_features_to_use = self.normalizer.transform(self.all_data_features_to_use)
         
         self.n_components = choose_pca_components(self.data_normalized_features_to_use, 0.75)
         self.pca = PCA(n_components=self.n_components).fit(self.data_normalized_features_to_use)
@@ -62,7 +90,7 @@ class ProbKnnGenerator(GeneratorBase):
         self.current_data["ID"] = self.current_data.index
     
     def _preprocess_counterfactual_targets(self, obs) -> pd.DataFrame:
-        data_to_genrate = convert_to_pca(obs.to_frame().T, self.pca, self.normalizer, self.features_to_use, self.features_pca)
+        data_to_genrate = convert_to_pca(obs, self.pca, self.normalizer, self.features_to_use, self.features_pca)
         data_to_genrate = data_to_genrate.fillna(0)
         return data_to_genrate
 
@@ -79,18 +107,23 @@ class ProbKnnGenerator(GeneratorBase):
             for feature in self.features_pca: 
                 counterfactual[feature] = self.data_pca[feature].iloc[idx]
             
-            counterfactual = convert_from_pca(counterfactual,base_obs, self.pca, self.normalizer, self.features_to_use, self.features_pca)
+            counterfactual = convert_from_pca(counterfactual, base_obs, self.pca, self.normalizer, self.features_to_use, self.features_pca)
             # to_continue = False
             for feature in self.features_increase_only:
-                if counterfactual[feature].values[0] < original_obs[feature]:
-                    counterfactual[feature].values[0] = original_obs[feature]*2
+                if counterfactual[feature].values[0] < original_obs[feature].values[0]:
+                    counterfactual[feature].values[0] = original_obs[feature].values[0]*2
             for feature in self.features_decrease_only:
-                if counterfactual[feature].values[0] > original_obs[feature]:
-                    counterfactual[feature].values[0] = original_obs[feature]/2            
+                if counterfactual[feature].values[0] > original_obs[feature].values[0]:
+                    counterfactual[feature].values[0] = original_obs[feature].values[0]/2
+            #check if the counterfactual is in the feature range the user provided 
+            for key, value in self.feature_range.items():
+                if counterfactual[key].values[0] > (base_obs[key].values[0])*(1+value[1]):
+                    counterfactual[key].values[0] = (base_obs[key].values[0])*(1+value[1])
+                if counterfactual[key].values[0] < (base_obs[key].values[0])*(1+value[0]):
+                    counterfactual[key].values[0] = (base_obs[key].values[0])*(1+value[0])
             tmp_counterfactual = counterfactual.copy()
             if self.config["target"] in tmp_counterfactual:
                     tmp_counterfactual = counterfactual.drop(self.config["target"], axis=1)
-
             if self.smart_condition.check(self.model.predict(tmp_counterfactual.drop(self.id, axis=1)))[0]:
                 # return counterfactual
                 distance = obs_distance(counterfactual.copy(), base_obs.copy(), self.config["target"])
@@ -137,6 +170,9 @@ class ProbKnnGenerator(GeneratorBase):
         
         weights = []
         data_cluster = self.data_pca.loc[index] 
+        for feature in data_cluster.select_dtypes(include=['category']).columns:
+            data_cluster[feature] = data_cluster[feature].astype('category').cat.codes
+            obs_original[feature] = obs_original[feature].astype('category').cat.codes
         for feature in data_cluster.drop(self.config["target"], axis=1).columns: 
             if feature == self.id:
                 weights.append(0)  
@@ -146,9 +182,13 @@ class ProbKnnGenerator(GeneratorBase):
                 weights.append(0)
         w_minkowski = partial(minkowski, p=2, w=weights)
         n_neigh = min(5, len(data_cluster))
-        nbrs = NearestNeighbors(n_neighbors=n_neigh, metric=w_minkowski).fit(data_cluster.drop(self.config["target"], axis=1))
-        indices = nbrs.kneighbors(obs_original, return_distance=False)
-        return indices[0]
+        try:
+            nbrs = NearestNeighbors(n_neighbors=n_neigh, metric=w_minkowski).fit(data_cluster.drop(self.config["target"], axis=1))
+            indices = nbrs.kneighbors(obs_original, return_distance=False)
+            return indices[0]
+        except Exception as e:
+            Logger.error("Error in KNN on cluster: " + str(e))
+            raise e
     
     def _postprocess_valid_data(self, data) -> list:        
         improve_cf = {}
