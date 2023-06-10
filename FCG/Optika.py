@@ -13,6 +13,8 @@ from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.cluster import KMeans, DBSCAN, OPTICS
 from scipy.stats import norm
 from FCG.CounterfactualGenerator import CounterfactualGenerator
+from sklearn import tree
+from sklearn.tree import export_text
 
 
 
@@ -47,7 +49,7 @@ class Optika(CounterfactualGenerator):
         
     def box(self, obs, n = 1000):
         """
-        Cutting a subset with fixed features.
+        Cutting a subset with fixed features which customer doesn't change.
 
         Parameters
         ----------
@@ -139,44 +141,64 @@ class Optika(CounterfactualGenerator):
             obs = obs.drop(self.config["target"], axis=1)
         return euclidean_distances(counterfactual, obs)[0][0]
     
-
-    
-
-    def generate_single_counterfactual(self, obs):
+    def generate_uniform_points(self,  obs_st, num_points, epsilon):
         """
-        Generates a single counterfactual for a given observation.
+
+        Generates synthetic data points for initial estimation.
+        Creates with a help of the uniform distribution in the neighborhood of the instance.
 
         Parameters
         ----------
-        obs : pd.DataFrame
-            The observation for which we want to generate a counterfactual.
+        num_points : int
+            number of points to generate
 
         Returns
         -------
         pd.DataFrame
-            The counterfactual for the given observation.
-
+            Synthetic dataframe 
+        
         """
-        indices = self.knn_on_cluster(obs)
-        obs_original = self.convert_to_original(obs)
-        cf = {}
-        for idx in indices:
-            counterfactual = obs.copy()
-            for feature in self.features_pca: 
-                counterfactual[feature] = self.data_with_weights[feature].iloc[idx]
-            counterfactual = self.convert_to_original(counterfactual)
-            # for feature in self.config["increase_features"]:
-            #     if counterfactual[feature].values[0] < obs_original[feature].values[0]:
-            #         counterfactual[feature] = obs_original[feature].values[0]*1.5
-            if self.model.predict(counterfactual.drop(self.config["target"], axis=1)) == self.target_class:
-                # return counterfactual
-                distance = self.distance(counterfactual.copy(), obs.copy())
-                if distance not in cf:
-                    cf[distance] = counterfactual.copy()
-        if cf:
-            return cf[min(cf.keys())]
-        return None 
+        dimension = len(self.X_st.columns)
+        points = np.random.uniform(obs_st - epsilon, obs_st + epsilon, size=(num_points, dimension))
+        X_gen = pd.DataFrame(points, columns = self.X_st.columns)
+        y_gen = self.model.predict(X_gen)
+        return X_gen, y_gen
     
+    
+    
+    def find_feature_importance_tree(self, X_gen, y_gen):
+        """
+
+        Finds the feature importance using decision tree classifier.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            The generated dataset for which we want to find the feature importance.
+
+        Returns
+        -------
+        features to use : list
+            List of important features
+        features to fix: list
+            List of fixed features
+        thresholds: list[float]
+        
+        """
+        n_features = self.max_features_to_change
+        clf = tree.DecisionTreeClassifier(random_state=0, max_depth=n_features)
+        clf = clf.fit(X_gen, y_gen)
+        ftrs = clf.feature_names_in_
+        #important_features = clf.tree_.feature
+        features_to_use = [ftrs[k] for k,v in dict(zip(clf.tree_.feature, clf.tree_.threshold)).items() if k >= 0]
+        thresholds = [v for k,v in dict(zip(clf.tree_.feature, clf.tree_.threshold)).items() if k >= 0]
+        self.features_to_use = features_to_use[0:n_features]
+        self.features_to_fix = self.X_st.columns.drop(self.features_to_use)
+        self.thresholds = thresholds[0:len(self.features_to_use)]
+
+        return self.features_to_use, self.features_to_fix, self.thresholds
+
+
 
     def find_feature_importance_regression(self):
         """
@@ -205,21 +227,17 @@ class Optika(CounterfactualGenerator):
         self.features_to_use = [dic[:n_features][x][1] for x in range(n_features)]
         return self.features_to_use
         
-    def slicing(self):
+    def slicing(self, target, n_neighbors):
         """
-        Cutting a subset with chosen features and right target class
+        Cutting a subset with chosen features and predetermined target class prepared for NN
 
         Parameters
         ----------
-        data_box : pd.DataFrame
-            Given data after boxing
-        data_st : pd.DataFrame
-            Standartized data
-        model: 
-            given model
-        obs_st: pd.Series
-            standartized instance
-        features_fixed: list
+        
+        target: int
+            target class, usually 0 or 1
+        n neighbors: int
+            number of neighbors  in NN
             
         
         Returns
@@ -229,14 +247,12 @@ class Optika(CounterfactualGenerator):
         
 
         """
-        features_fix = list(self.X_st.columns)
-        for c in self.features_to_use:
-            features_fix.remove(c)
-        d_class = self.all_data[self.model.predict(self.all_data.drop(self.config['target'], axis=1)) == 1].index
+        
+        d_class = self.all_data[self.model.predict(self.all_data.drop(self.config['target'], axis=1)) == target].index
         data_class_st = self.X_st.loc[self.X_st.index.isin(d_class)]
-        obs_ = self.obs_st[features_fix]
-        data_class_ = data_class_st[features_fix]
-        neighbors = NearestNeighbors(n_neighbors= 500, algorithm='ball_tree')
+        obs_ = self.obs_st[self.features_to_fix]
+        data_class_ = data_class_st[self.features_to_fix]
+        neighbors = NearestNeighbors(n_neighbors= min(n_neighbors, data_class_.shape[0]), algorithm='ball_tree')
         neighbors.fit(data_class_)
         indices = neighbors.kneighbors(obs_, return_distance=True) 
         index = [data_class_.iloc[[k,]].index.item() for k in indices[1][0]]
@@ -281,6 +297,241 @@ class Optika(CounterfactualGenerator):
         self.data_res = data_centr.loc[centers,].reset_index()
         #data_res = data_centr.loc[slice['labels'].isin(cf_labels)]
         return self.radius, self.data_res
+    
+    
+    def weitzfeld(self, thresholds, w, n_iter, n_neighbors = 5):
+        """
+        Choose the counterfactual via weitzfeld algorythm
+
+        Parameters
+        ----------
+        threshold : list[float]
+            the initial point for search
+        w : list[float], length = 2
+            weights, must be summed up to 1
+            w[0] the weight of the instance
+            w[1] the weight of target neighbors, works as a proxie for density
+
+        n_iter: int
+            number of iterations
+        n_neighbors: int
+            number of neighbors to be accounterd for
+            
+        
+        Returns
+        -------
+        dist: float
+            weighted sum of distances between the instance, counterfactual and target class
+        cand_obs: pd.DataFrame
+            counterfactual
+        
+
+        """
+    
+        cand_obs = self.obs_st.copy().reset_index(drop = True)
+        cand_obs[self.features_to_use] = thresholds
+        if (self.model.predict(cand_obs) == 0):
+            print('Please try another initial point')
+        cand_dist = euclidean_distances(self.obs_st, cand_obs)[0][0]
+        self.slice = self.slicing(1,100)
+        nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm='ball_tree').fit(self.slice)
+        weights = [w[0]] + [w[1]] * n_neighbors
+        curr_obs = cand_obs.copy()
+        for _ in range(n_iter):
+            centers = nbrs.kneighbors(curr_obs, return_distance = True)[1][0]
+            points = np.array(self.slice.iloc[centers])
+            xj = np.concatenate((np.array(self.obs_st), points))
+            #print(xj)
+            edi = euclidean_distances(xj, curr_obs)
+            #print('edi', edi)
+            curr_dist = np.average(edi, weights = weights, axis = 0)[0]
+            #print('curr_dist', curr_dist)
+            #print('prediction', log_reg.predict(curr_obs))
+            if (self.model.predict(curr_obs) == 1) & (curr_dist < cand_dist):
+                cand_dist = curr_dist
+                cand_obs = curr_obs.copy()
+                denom = np.average((1/edi), weights = weights, axis = 0)
+                nomin = np.average((xj/edi), weights = weights, axis = 0)
+                u = (nomin/denom).reshape((1,len(self.X_st.columns)))
+                curr_obs = pd.DataFrame(u, columns = self.X_st.columns)
+                for f in self.features_to_fix:
+                    curr_obs[f] = self.obs_st[f].values[0]
+                #print('curr_obs', curr_obs)
+                
+            
+        
+        return cand_obs, cand_dist
+    
+    # Define the objective function for each agent
+    def objective_function(self, curr_obs, xj, weights):
+        """
+
+        Finds the objective distance
+
+        Parameters
+        ----------
+        curr_obs: pd.DataFrame
+            the original point
+        xj : pd.DataFrame
+            points included in the objective distance
+        weights: list[float]
+        Returns
+        -------
+        
+        curr_dist: float
+        
+        """
+        edi = euclidean_distances(xj, curr_obs)
+        curr_dist = np.average(edi, weights = weights, axis = 0)[0]
+        return curr_dist
+    
+
+    #Define the start point for fine-tuning
+    def initial_point(self, features_to_use, thresholds, num_agents = 1):
+        """
+
+        Finds the initial estimate
+
+        Parameters
+        ----------
+        features to use: list
+            features to be changed
+        thresholds : list[float]
+            initial estimate positions, a np.array with number of columns equal to len(features_to_use)
+            number of rows equal to number of agents
+        num_agents: int
+            number of initial estimates
+        Returns
+        -------
+        
+        best obs: pd.DataFrame, length =  number of initial agents
+        
+        """
+        best_obs = pd.DataFrame(index = range(num_agents), columns = self.X_st.columns)
+        best_obs.loc[[0,]] = self.obs_st.copy().reset_index(drop = True)
+        best_obs[features_to_use] = thresholds
+        best_obs.fillna(method = 'ffill', inplace = True)
+        return best_obs
+    
+    def beeswarm(self, obs_st, features_to_use, thresholds, w, n_attraction_neighbors = 3, n_repulsion_neighbors = 3, 
+    num_agents= 3, num_iterations = 5, inertia_weight = 0.7, cognitive_weight = 0.4, social_weight = 0.3):
+        """
+        Choose the counterfactual via weitzfeld algorythm
+
+        Parameters
+        ----------
+        obs_st: pd.DataFrame
+            the instance
+        features to use: list
+            list of features to be changed
+        thresholds : list[float], length - number of features to be changed
+            the initial point for search
+        w : list[float], length = 3
+            w[0] the weight of the instance
+            w[1] the weight of target neighbors, works as a proxie for density
+            w[2] the weight of anti-target neighbors, works as a proxie for density
+        n_attraction_neighbors: int
+            number of neighbors to be accounted for attraction
+        n_repulsion_neighbors: int
+            number of neighbors to be accounted for repulsion
+        num_agents: int
+            number of agents (directions of search)
+        num_iterations: int
+            number of iterations in pyswarm search
+        inertia_weight: float
+            inertia weight in pyswarm search
+        cognitive_weight: float
+            cognitive weight in pyswarm search
+        social_weight: float
+            social weight in pyswarm search
+
+            
+        
+        Returns
+        -------
+        dist: float
+            weighted sum of distances between the instance, counterfactual, target class and instance class
+        cfs: pd.DataFrame
+            counterfactual
+        
+
+        """
+        slice1 = self.slicing(1,100)
+        slice0 = self.slicing(0,100)
+        nbrs1 = NearestNeighbors(n_neighbors=n_attraction_neighbors, algorithm='ball_tree').fit(slice1)
+        nbrs0 = NearestNeighbors(n_neighbors=n_repulsion_neighbors, algorithm='ball_tree').fit(slice0)
+        num_dimensions = len(features_to_use)
+        best_obs = self.initial_point(features_to_use, thresholds, num_agents)
+        weights = [w[0]] + [w[1]] * n_attraction_neighbors + [w[2]] * n_repulsion_neighbors
+
+        # Initialize the agents' initial positions and fitness values
+        epsilon = euclidean_distances(obs_st, best_obs)[0][0]
+        positions = thresholds + np.random.uniform(low=-epsilon, high=epsilon, size= (num_agents, num_dimensions))
+        velocities = np.zeros((num_agents, num_dimensions))
+        best_positions = positions.copy()
+        best_dist = np.zeros(num_agents)
+        bee = best_obs.copy()
+        for i in range(num_agents):
+            bee.loc[i,features_to_use] = positions[i]
+            best_dist[i] = euclidean_distances(obs_st, bee.loc[[i,]])[0][0]
+        
+        # Find the global best position and fitness value
+        condition = self.model.predict(bee) == 1   #target class
+        filtered_arr = best_dist[condition]
+        if filtered_arr.any():
+            min_index = np.argmin(filtered_arr)
+        else:
+            print('We cant find any close elements in the target class, try again')
+        # Adjust the index to match the original array
+        masked_indices = np.where(condition)[0]
+        global_best_index = masked_indices[min_index]
+        global_best_position = best_positions[global_best_index]
+        global_best_dist = best_dist[global_best_index]
+
+        #Iteration  process
+        for _ in range(num_iterations):
+            print('ITERATION  ', _)
+            for i in range(num_agents):
+                #print('BEE   ', i)
+                centers1 = nbrs1.kneighbors(bee.loc[[i,]], return_distance = True)[1][0]
+                points1 = np.array(slice1.iloc[centers1])
+                centers0 = nbrs0.kneighbors(bee.loc[[i,]], return_distance = True)[1][0]
+                points0 = np.array(slice0.iloc[centers0])
+                xj = np.concatenate((np.array(obs_st), points1, points0))
+                #print(xj)
+                dist = self.objective_function(bee.loc[[i,]], xj, weights)
+                if (self.model.predict(bee.loc[[i,]]) == 1) & (dist < best_dist[i]):
+                    best_dist[i] = dist
+                    best_positions[i] = positions[i]
+                    # Update the global best position and fitness value
+                    if dist < global_best_dist:
+                        global_best_position = positions[i]
+                        global_best_dist = dist
+                    #print('global dist', global_best_dist)
+                    #print('global position', global_best_position)
+                    best_obs.loc[i, features_to_use] = positions[i]
+                    # Update the agent's velocity
+                    #print('best_obs', best_obs)
+                    cognitive_component = cognitive_weight * np.random.rand() * (best_positions[i] - positions[i])
+                    social_component = social_weight * np.random.rand() * (global_best_position - positions[i])
+                    velocities[i] = inertia_weight * velocities[i] + cognitive_component + social_component
+                    # Update the agent's position
+                    positions[i] += velocities[i]
+                    #print('will try positions',positions[i])
+                    bee.loc[i, features_to_use] = positions[i]
+                elif (self.model.predict(bee.loc[[i,]]) == 0):
+                    positions[i] = thresholds[i] + np.random.uniform(low=-epsilon, high=epsilon)
+                    #print('will try random positions',positions[i])
+                    bee.loc[i, features_to_use] = positions[i]
+                    best_dist[i] = euclidean_distances(obs_st, bee.loc[[i,]])[0][0]
+            print('best', global_best_position)
+            print('__________________________________________')
+        
+        cfs = obs_st.copy()
+        cfs[features_to_use] = global_best_position
+        return cfs, global_best_dist
+
+
     
     
     def generate(self):
@@ -343,63 +594,4 @@ class Optika(CounterfactualGenerator):
     
     
     
-    def calculate_point(self,start,direction,step):
-        """
-        Calculates a point in a given direction and distance from a given point.
-
-        Parameters
-        ----------  
-        start : np.array
-            The starting point.
-        direction : np.array
-            The direction in which we want to move.
-
-        Returns
-        -------
-        np.array
-            The point in the given direction and distance from the starting point.
-
-        """
-        return start + direction*step
-
-    def calculate_distance(self,point1,point2):
-        return np.linalg.norm(point1-point2)
-
-    def calculate_direction(self,point1,point2):
-        return (point2-point1)/np.linalg.norm(point2-point1)
-
-    def improve_with_binary_search_by_vectors(self,start_point,end_point):
-        """
-        Improves the counterfactual found using the knn method by using binary search. 
-
-        Parameters
-        ----------
-        start_point : pd.DataFrame
-            The starting point - the original observation. 
-        end_point : pd.DataFrame
-            The end point - the counterfactual found using the knn method.
-
-        Returns
-        -------
-        pd.DataFrame
-            The improved counterfactual.
-
-        """
-        
-        distance = self.calculate_distance(start_point,end_point) 
-        direction = self.calculate_direction(start_point,end_point) 
-        
-        start_distance = -distance
-        end_distance = distance
-
-        while (end_distance-start_distance).sum() > distance*0.001: 
-            mid_point = self.calculate_point(start_point,direction,(start_distance+end_distance)/2)
-            mid_point = mid_point[self.all_data.drop(self.config["target"], axis=1).columns]
-            mid_point[self.features_to_use] = mid_point[self.features_to_use].astype(int)
-            if self.model.predict(mid_point) == self.target_class:
-                end_distance = (start_distance+end_distance)/2
-            else:
-                start_distance = (start_distance+end_distance)/2
-
-        return self.calculate_point(start_point,direction,(start_distance+end_distance)/2)
     
