@@ -10,6 +10,8 @@ from sklearn.preprocessing import normalize
 from FastCG.utils.logger import Logger
 
 def find_centroid(data, n_clusters=100, random_state=0, features_pca=None):
+    # n_clusters is min (0.1*len(data), n_clusters), sanity in case of small data size
+    n_clusters = min(int(0.1*len(data)), n_clusters)
     kmean = KMeans(n_clusters=n_clusters,
                         random_state=random_state).fit(data)
     return pd.DataFrame(kmean.cluster_centers_, columns=features_pca), kmean.labels_
